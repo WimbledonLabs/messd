@@ -24,7 +24,7 @@ impl BlockAccessor for BlockAccessFile {
         self.backing_file.read(block).unwrap();
     }
 
-    fn write_block(&mut self, _block: &[u8]) -> Result<(), BlockAccessError> {
+    fn write_block(&mut self, _block_num: u64, _block: &[u8]) -> Result<(), BlockAccessError> {
         Err(BlockAccessError::MiscError)
     }
 }

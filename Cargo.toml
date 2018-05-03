@@ -4,3 +4,5 @@ version = "0.1.0"
 authors = ["Stephen Molyneaux <shmolyne@uwaterloo.ca>"]
 
 [dependencies]
+spidev = "0.3.0"
+crc16 = "0.3.4"
