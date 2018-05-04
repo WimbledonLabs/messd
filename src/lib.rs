@@ -1,5 +1,8 @@
 extern crate spidev;
 extern crate crc16;
+extern crate heapless;
+#[macro_use]
+extern crate bitflags;
 
 pub mod block_accessor;
 pub mod file_block_accessor;
@@ -124,16 +127,25 @@ impl BlockAccessor for SDCard {
 }
 
 pub mod fat32 {
+    use heapless::{String};
+    use heapless::consts::{U12, U13, U128};
     use byte_util::{little_endian_to_int, take_from_slice, taken_from_slice};
     use block_accessor::{BlockAccessor};
-    pub struct Fat32<N> where N: BlockAccessor {
-        pub block_storage: N,
+
+    use std;
+
+    pub const BYTES_PER_BLOCK: u32 = 512;
+    const BYTES_PER_CLUSTER_ENTRY: u64 = 4;
+    const BYTES_PER_DIRECTORY_ENTRY: u32 = 32;
+
+    pub struct Fat32<B> where B: BlockAccessor {
+        pub block_storage: B,
         pub physical_start_block: u32,
         pub boot_sector: BootSector
     }
 
-    impl<N: BlockAccessor> Fat32<N> {
-        pub fn new(mut block_storage: N, physical_start_block: u32) -> Fat32<N> {
+    impl<B: BlockAccessor> Fat32<B> {
+        pub fn new(mut block_storage: B, physical_start_block: u32) -> Fat32<B> {
             let mut block = [0; 512];
 
             println!("Reading block {}", physical_start_block);
@@ -148,8 +160,211 @@ pub mod fat32 {
             }
         }
 
-        pub fn ls(&self, _path: &[&str]) -> Vec<String> {
-            Vec::new()
+        /// Get data from the specified cluster, returning the number of bytes
+        /// read.
+        ///
+        /// The length of `result` defines the maximum number of bytes that will
+        /// be read, starting from the byte in the position `byte_offset`.
+        ///
+        /// Cluster numbers only start at 2. This will panic on cluster numbers
+        /// 0 and 1.2
+        ///
+        /// `fat32.boot_sector.bpb.sectors_per_cluster*512` defines the maximum number
+        /// of bytes that can  be returned from this function.
+        pub fn get_cluster(&mut self, cluster_num: u32, byte_offset: usize, result: &mut [u8]) -> usize {
+            assert!(cluster_num >= 2);
+            let mut out: Vec<u8> = Vec::new();
+
+            let cluster_start_offset: u32 =
+                self.physical_start_block +
+                self.boot_sector.bpb.reserved_logical_sectors as u32 +
+                self.boot_sector.bpb.sectors_per_fat as u32 * 2;
+
+            let starting_block =
+                cluster_start_offset +
+                self.boot_sector.bpb.sectors_per_cluster as u32 *(cluster_num-2);
+
+            for block_num in starting_block..(starting_block +
+                    self.boot_sector.bpb.sectors_per_cluster as u32)
+            {
+                let mut block = [0; 512];
+                self.block_storage.read_block(block_num as u64, &mut block);
+                out.extend(block.iter());
+            }
+
+            let mut count = 0;
+            for (position, byte) in out.iter()
+                                       .skip(byte_offset)
+                                       .take(result.len())
+                                       .enumerate()
+            {
+                count += 1;
+                result[position] = *byte;
+            }
+
+            count
+        }
+
+        /// Get the next cluster number from the file allocation table.
+        /// Returns None when the provided cluster number is the last cluster in
+        /// the chain.
+        pub fn cluster_number_after(&mut self, cluster_num: u32) -> Option<u32> {
+            assert!(cluster_num >= 2);
+
+            let file_allocation_table_start_block: u64 =
+                self.physical_start_block as u64 +
+                self.boot_sector.bpb.reserved_logical_sectors as u64;
+
+            let block_num_for_cluster: u64 =
+                file_allocation_table_start_block +
+                (cluster_num as u64 * BYTES_PER_CLUSTER_ENTRY) / BYTES_PER_BLOCK as u64;
+
+            let mut block = [0; 512];
+            self.block_storage.read_block(block_num_for_cluster, &mut block);
+
+            let cluster_entry_offset: usize =
+                (cluster_num as usize * BYTES_PER_CLUSTER_ENTRY as usize) % 512 as usize;
+
+            let next_cluster = little_endian_to_int(
+                &block[cluster_entry_offset..cluster_entry_offset+4]);
+
+            if next_cluster == 0 {
+                None
+            } else {
+                Some(next_cluster)
+            }
+        }
+
+        pub fn print_root_dir(&mut self) {
+            self.ls_cluster(2);
+        }
+
+        pub fn ls_cluster(&mut self, cluster_num: u32) {
+
+            let mut block = [0; 512];
+
+            // The root directory is the first cluster, the first cluster is
+            // cluster 2
+            self.get_cluster(cluster_num, 0, &mut block);
+
+            for entry_bytes in block.chunks(BYTES_PER_DIRECTORY_ENTRY as usize) {
+                let entry = Entry::new(entry_bytes);
+                match entry {
+                    Entry::Lfn(e) => {
+                        for ucs_code_point in e.file_name.iter() {
+                            if (ucs_code_point >> 8) > 0x7Fu16 {
+                                break;
+                            }
+                            print!("{}", (ucs_code_point >> 8) as u8 as char);
+                        }
+                        print!("\n")
+                    },
+                    Entry::DirectoryEntry(e) => {
+                        println!("{:#?}", e);
+                        //unsafe {
+                        //    println!("{:?}.{:?}",
+                        //             str::from_utf8_unchecked(&e.file_name_bytes),
+                        //             str::from_utf8_unchecked(&e.file_extension_bytes));
+                        //}
+                     },
+                    Entry::Empty => println!("!placeholder!"),
+                    Entry::Last => println!("!placeholder!")
+                }
+            }
+        }
+
+        pub fn iter_contents_of_directory_cluster<'a>(&'a mut self, cluster_num: u32) -> DirectoryIterator<'a, B> {
+            DirectoryIterator::new(self, cluster_num)
+        }
+
+        pub fn file_info(&mut self, path: std::string::String) -> FileInfo {
+            unimplemented!();
+        }
+    }
+
+    pub struct FileInfo { }
+
+    pub struct DirectoryIterator<'a, B: 'a>
+        where B: BlockAccessor
+    {
+        fat32: &'a mut Fat32<B>,
+        cluster: u32,
+        entry_in_cluster: u32
+    }
+
+    impl<'a, B: BlockAccessor> DirectoryIterator<'a, B> {
+        fn new(fat32: &'a mut Fat32<B>, cluster: u32) -> 
+            DirectoryIterator<'a, B>
+        {
+            DirectoryIterator {
+                fat32: fat32,
+                cluster: cluster,
+                entry_in_cluster: 0
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum DirectoryItem {
+        File(File),
+        Directory(Directory)
+    }
+
+    #[derive(Debug)]
+    struct File {
+        name: String<U128>,
+        cluster: u32,
+        size: u64
+        // Maybe flags later?
+    }
+
+    #[derive(Debug)]
+    struct Directory {
+        name: String<U128>,
+        cluster: u32,
+        // Maybe flags later?
+    }
+
+    impl<'a, B: BlockAccessor> Iterator for DirectoryIterator<'a, B> {
+        type Item = String<U128>;
+
+        fn next(&mut self) -> Option<String<U128>> {
+            // TODO this will break if a directory is more than 1 cluster
+            let mut item_name: String<U128> = String::new();
+
+            loop {
+                let cluster_offset: usize =
+                    (self.entry_in_cluster * BYTES_PER_DIRECTORY_ENTRY) as usize;
+                self.entry_in_cluster += 1;
+
+                let mut entry_bytes = [0; 32];
+                self.fat32.get_cluster(self.cluster, cluster_offset, &mut entry_bytes);
+
+                match Entry::new(&entry_bytes) {
+                    Entry::Lfn(e) => {
+                        // TODO make this more efficient and less ugly
+                        let mut new_item_name = String::new();
+                        new_item_name.push_str(&e.name()).unwrap();
+
+                        match new_item_name.push_str(&item_name) {
+                            Err(_) => break,
+                            _ => ()
+                        }
+
+                        item_name = new_item_name;
+                    },
+                    Entry::DirectoryEntry(e) => {
+                        if item_name.len() == 0 {
+                            item_name.push_str(&e.name()).unwrap();
+                        }
+                        break;
+                    },
+                    Entry::Empty => item_name.clear(),
+                    Entry::Last => return None
+                }
+            }
+
+            Some(item_name)
         }
     }
 
@@ -323,6 +538,7 @@ pub mod fat32 {
         }
     }
 
+    #[derive(Debug)]
     pub enum Entry {
         DirectoryEntry(DirectoryEntry),
         Lfn(LfnEntry),
@@ -341,12 +557,13 @@ pub mod fat32 {
                 0xE5 => Entry::Empty,
                 _ => match bytes[0x0B] {
                     0x0F => Entry::Lfn(LfnEntry::new(bytes)),
-                    _ => Entry::DirectoryEntry(DirectoryEntry {})
+                    _ => Entry::DirectoryEntry(DirectoryEntry::new(bytes))
                 }
             }
         }
     }
 
+    #[derive(Debug)]
     pub struct LfnEntry {
         pub file_name: [u16; 13]
     }
@@ -369,10 +586,102 @@ pub mod fat32 {
 
             LfnEntry {file_name: file_name}
         }
+
+        fn name(&self) -> String<U13> {
+            let mut name = String::new();
+
+            for codepoint in self.file_name.iter() {
+                let ch = (codepoint >> 8) as u8;
+
+                if ch == 0 {
+                    break;
+                }
+
+                if ch > 0x7F {
+                    // TODO don't skip non-ascii characters
+                    continue;
+                }
+
+                match name.push(ch as char) {
+                    Err(_) => break,
+                    _ => ()
+                }
+            }
+
+            name
+        }
     }
 
-    pub struct DirectoryEntry {
+    bitflags! {
+        pub struct DirectoryEntryFlags: u8 {
+            const READ_ONLY    = 0b0000_0001;
+            const HIDDEN       = 0b0000_0010;
+            const SYSTEM       = 0b0000_0100;
+            const VOLUME_LABEL = 0b0000_1000;
+            const SUBDIRECTORY = 0b0001_0000;
+            const ARCHIVE      = 0b0010_0000;
+            const DEVICE       = 0b0100_0000;
+            const RESERVED     = 0b1000_0000;
+        }
+    }
 
+    #[derive(Debug)]
+    pub struct DirectoryEntry {
+        pub file_name_bytes: [u8; 8],
+        pub file_extension_bytes: [u8; 3],
+        pub flags: DirectoryEntryFlags,
+        pub cluster_num: u32,
+        pub size: u32
+    }
+
+    impl DirectoryEntry {
+        fn new(bytes: &[u8]) -> DirectoryEntry {
+            assert!(bytes.len() == 32);
+
+            let mut file_name_bytes = [0; 8];
+            for (idx, byte) in bytes[0..8].iter().enumerate() {
+                file_name_bytes[idx] = *byte;
+            }
+
+            let mut file_extension_bytes = [0; 3];
+            for (idx, byte) in bytes[0x08..0x0B].iter().enumerate() {
+                file_extension_bytes[idx] = *byte;
+            }
+
+            let flags = DirectoryEntryFlags { bits: bytes[0x0B] };
+
+            let low_cluster_num  = little_endian_to_int(&bytes[0x1A..0x1C]);
+            let high_cluster_num = little_endian_to_int(&bytes[0x14..0x16]);
+
+            let cluster_num = (high_cluster_num << 16) + low_cluster_num;
+            let size = little_endian_to_int(&bytes[0x1C..0x20]);
+
+            DirectoryEntry {
+                file_name_bytes: file_name_bytes,
+                file_extension_bytes: file_extension_bytes,
+                flags: flags,
+                cluster_num: cluster_num,
+                size: size
+            }
+
+
+        }
+
+        fn name(&self) -> String<U12> {
+            let mut name = String::new();
+
+            for ch in self.file_name_bytes.iter() {
+                name.push(*ch as char).unwrap();
+            }
+
+            name.push('.').unwrap();
+
+            for ch in self.file_extension_bytes.iter() {
+                name.push(*ch as char).unwrap();
+            }
+
+            name
+        }
     }
 }
 
@@ -494,12 +803,36 @@ mod tests {
     use fat32::Fat32;
 
     #[test]
-    fn it_works() {
-        let mut t = BlockAccessFile::new("../card-dump/sd.img").unwrap();
+    fn basic_file_block_access() {
+        let mut t = BlockAccessFile::new("../card-dump/sd-trim.img").unwrap();
         let mut block = [0;512];
         t.read_block(0, &mut block);
         assert_eq!(block[510], 0x55);
         assert_eq!(block[511], 0xAA);
+    }
+
+    #[test]
+    fn basic_ls() {
+        let mut t = BlockAccessFile::new("../card-dump/sd-trim.img").unwrap();
+
+        let mut block = [0; 512];
+        t.read_block(0, &mut block);
+
+        let mbr = MBR::from_bytes(&block);
+        let partition = mbr.partition_entries.get(0).unwrap().as_ref().unwrap();
+
+        let mut fat32 = Fat32::new(t, partition.first_sector_block_address);
+        // fat32.ls_cluster(3);
+
+        for name in fat32.iter_contents_of_directory_cluster(4) {
+            print!("{:?} - ", name);
+            for ch in name.as_bytes().iter() {
+                print!("{}, ", ch);
+            }
+            print!("\n");
+        }
+
+        assert!(false);
     }
 
     use std::io;
@@ -516,7 +849,6 @@ mod tests {
         try!(spi.configure(&options));
         Ok(spi)
     }
-
 
     #[test]
     #[ignore]
@@ -562,6 +894,6 @@ mod tests {
         let partition = mbr.partition_entries.get(0).unwrap().as_ref().unwrap();
 
         let mut fat32 = Fat32::new(sd, partition.first_sector_block_address);
-        assert_eq!(fat32.ls(&[""]), vec!["projects".to_string(), "TEST_PAR.T1".to_string()]);
+        // assert_eq!(fat32.ls(&[""]), vec!["projects".to_string(), "TEST_PAR.T1".to_string()]);
     }
 }

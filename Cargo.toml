@@ -6,3 +6,5 @@ authors = ["Stephen Molyneaux <shmolyne@uwaterloo.ca>"]
 [dependencies]
 spidev = "0.3.0"
 crc16 = "0.3.4"
+heapless = "0.3.5"
+bitflags = "1.0.3"
