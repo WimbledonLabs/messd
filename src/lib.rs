@@ -132,8 +132,6 @@ pub mod fat32 {
     use byte_util::{little_endian_to_int, take_from_slice, taken_from_slice};
     use block_accessor::{BlockAccessor};
 
-    use std;
-
     pub const BYTES_PER_BLOCK: u32 = 512;
     const BYTES_PER_CLUSTER_ENTRY: u64 = 4;
     const BYTES_PER_DIRECTORY_ENTRY: u32 = 32;
@@ -277,8 +275,126 @@ pub mod fat32 {
             DirectoryIterator::new(self, cluster_num)
         }
 
-        pub fn file_info(&mut self, path: std::string::String) -> FileInfo {
-            unimplemented!();
+        pub fn get_file_from_cluster(&mut self, cluster_num: u32) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut cluster_num = Some(cluster_num);
+
+            while let Some(num) = cluster_num {
+                let mut block: Vec<u8> = [0].iter().cycle().take(4096).map(|i| *i).collect();
+                self.get_cluster(num, 0, block.as_mut_slice());
+                out.append(&mut block);
+                cluster_num = self.cluster_number_after(num);
+            }
+
+            out
+        }
+
+        /// Undefined behaviour when the size of block doesn't evenly divide
+        /// a cluster
+        pub fn iter_file<'a, 'b>(&'a mut self, file: File, block: &'b mut [u8]) -> FileIterator<'a, 'b, B> {
+            FileIterator {
+                fat32: self,
+                cluster: Some(file.cluster),
+                bytes_read: 0,
+                file_size: file.size,
+                block: block
+            }
+        }
+
+        pub fn item_info(&mut self, path: &str) -> Option<DirectoryItem> {
+            // Start at the root directory
+            let mut current_cluster = 2;
+
+            if path.ends_with("/") {
+                // Files don't end with '/'
+                return None
+            }
+
+            // TODO don't make two iterators
+            let path_length = path.split('/').count();
+            let path_iter = path.split('/');
+
+            println!("Starting iteration with path length {:?}", path_length);
+            'iter_part: for (part_num, part) in path_iter.enumerate() {
+                println!("Starting part {:?}", part);
+                if part.len() == 0 {
+                    continue;
+                }
+
+                for item in self.iter_contents_of_directory_cluster(current_cluster) {
+                    println!("Checking item {:?}", item);
+                    match item {
+                        DirectoryItem::Directory(d) => {
+                            println!("Got directory {:?}", d);
+                            if d.name == part {
+                                if part_num+1 == path_length {
+                                    return Some(DirectoryItem::Directory(d));
+                                }
+                                current_cluster = d.cluster;
+                                continue 'iter_part;
+                            } else {
+                                println!("part {:?} does d.name {:?}", part, d.name);
+                            }
+                        },
+                        DirectoryItem::File(f) => {
+                            println!("Got file {:?}", f);
+                            if f.name == part && part_num+1 == path_length {
+                                // This is the last part, and should represent
+                                // the file
+                                return Some(DirectoryItem::File(f));
+                            }
+                        }
+                    }
+                }
+
+                // Could not find the next item in the path, so we fail
+                break;
+            }
+            println!("Done iteration");
+
+            None
+        }
+    }
+
+    struct FileIterator<'a, 'b, B: 'a>
+        where B: BlockAccessor
+    {
+        fat32: &'a Fat32<B>,
+        cluster: Option<u32>,
+        bytes_read: u32,
+        file_size: u32,
+        block: &'b mut [u8]
+    }
+
+    impl<'a, 'b, B> Iterator for FileIterator<'a, 'b, B>
+        where B: BlockAccessor
+    {
+        type Item = &'b [u8];
+        fn next(&mut self) -> Option<Self::Item> {
+            let bytes_per_cluster: u32 =
+                self.fat32.boot_sector.bpb.sectors_per_cluster as u32 * BYTES_PER_BLOCK as u32;
+
+            match self.cluster {
+                None => None,
+                Some(cluster_num) => {
+
+                    let bytes_read = self.fat32.get_cluster(
+                        cluster_num,
+                        (self.bytes_read % (bytes_per_cluster)) as usize,
+                        self.block) as u32;
+                    self.bytes_read += bytes_read;
+
+                    if self.bytes_read % bytes_per_cluster == 0 {
+                        self.cluster = self.fat32.cluster_number_after(cluster_num);
+                    }
+
+                    let bytes_left = self.file_size - self.bytes_read;
+                    // TODO return only the bytes in the file and not more
+                    // let bytes_to_return = self.block.split_at(bytes_read.min(bytes_left) as usize).0;
+                    // Some(bytes_to_return)
+                    Some(self.block)
+                }
+            }
         }
     }
 
@@ -305,30 +421,30 @@ pub mod fat32 {
     }
 
     #[derive(Debug)]
-    enum DirectoryItem {
+    pub enum DirectoryItem {
         File(File),
         Directory(Directory)
     }
 
     #[derive(Debug)]
-    struct File {
-        name: String<U128>,
-        cluster: u32,
-        size: u64
+    pub struct File {
+        pub name: String<U128>,
+        pub cluster: u32,
+        pub size: u32
         // Maybe flags later?
     }
 
     #[derive(Debug)]
-    struct Directory {
-        name: String<U128>,
-        cluster: u32,
+    pub struct Directory {
+        pub name: String<U128>,
+        pub cluster: u32,
         // Maybe flags later?
     }
 
     impl<'a, B: BlockAccessor> Iterator for DirectoryIterator<'a, B> {
-        type Item = String<U128>;
+        type Item = DirectoryItem;
 
-        fn next(&mut self) -> Option<String<U128>> {
+        fn next(&mut self) -> Option<DirectoryItem> {
             // TODO this will break if a directory is more than 1 cluster
             let mut item_name: String<U128> = String::new();
 
@@ -346,10 +462,7 @@ pub mod fat32 {
                         let mut new_item_name = String::new();
                         new_item_name.push_str(&e.name()).unwrap();
 
-                        match new_item_name.push_str(&item_name) {
-                            Err(_) => break,
-                            _ => ()
-                        }
+                        new_item_name.push_str(&item_name).unwrap();
 
                         item_name = new_item_name;
                     },
@@ -357,14 +470,28 @@ pub mod fat32 {
                         if item_name.len() == 0 {
                             item_name.push_str(&e.name()).unwrap();
                         }
-                        break;
+
+                        if e.flags.contains(DirectoryEntryFlags::SUBDIRECTORY) {
+                            return Some(DirectoryItem::Directory(
+                                Directory {
+                                    name: item_name,
+                                    cluster: e.cluster_num
+                                }
+                            ));
+                        } else {
+                            return Some(DirectoryItem::File(
+                                File {
+                                    name: item_name,
+                                    cluster: e.cluster_num,
+                                    size: e.size
+                                }
+                            ));
+                        }
                     },
                     Entry::Empty => item_name.clear(),
                     Entry::Last => return None
                 }
             }
-
-            Some(item_name)
         }
     }
 
@@ -663,8 +790,6 @@ pub mod fat32 {
                 cluster_num: cluster_num,
                 size: size
             }
-
-
         }
 
         fn name(&self) -> String<U12> {
@@ -800,7 +925,7 @@ mod tests {
 
     use SDCard;
     use mbr::MBR;
-    use fat32::Fat32;
+    use fat32::{Fat32, DirectoryItem};
 
     #[test]
     fn basic_file_block_access() {
@@ -824,15 +949,34 @@ mod tests {
         let mut fat32 = Fat32::new(t, partition.first_sector_block_address);
         // fat32.ls_cluster(3);
 
-        for name in fat32.iter_contents_of_directory_cluster(4) {
-            print!("{:?} - ", name);
-            for ch in name.as_bytes().iter() {
-                print!("{}, ", ch);
+        for item in fat32.iter_contents_of_directory_cluster(4) {
+            match item {
+                DirectoryItem::File(f) => {
+                    println!("{:?}", f.name);
+                },
+                DirectoryItem::Directory(d) => {
+                    println!("{:?}", d.name);
+                }
             }
-            print!("\n");
         }
 
-        assert!(false);
+        use std::fs::File;
+        use std::io::prelude::*;
+
+        match fat32.item_info("projects/shmorc/python_welcome.mp3").unwrap() {
+            DirectoryItem::File(f) => {
+                assert_eq!(f.size, 19225);
+                let mut file = File::create("python_welcome.mp3").unwrap();
+                let mut file_data: Vec<u8> = fat32.get_file_from_cluster(f.cluster);
+
+                for block in fat32.iter_file(file_data, &mut block) {
+                    file.write(block).unwrap();
+                }
+            },
+            _ => panic!("Should be a file")
+        }
+        println!("{:?}", fat32.item_info("projects"));
+        // assert!(false);
     }
 
     use std::io;
