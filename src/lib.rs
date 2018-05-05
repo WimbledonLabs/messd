@@ -1,22 +1,25 @@
-extern crate spidev;
+extern crate block_accessor;
 extern crate crc16;
 extern crate heapless;
+extern crate streaming_iterator;
+extern crate embedded_hal;
+extern crate linux_embedded_hal;
+extern crate nb;
+
 #[macro_use]
 extern crate bitflags;
 
-pub mod block_accessor;
 pub mod file_block_accessor;
 
-// External crates
-use spidev::{Spidev};
+use embedded_hal::blocking::delay::DelayMs;
+use embedded_hal::spi::FullDuplex;
 
-use std::io::prelude::*;
-
-// Internal crates
 use block_accessor::{BlockAccessor, BlockAccessError};
 
-pub struct SDCard {
-    spi: Spidev
+pub struct SDCard<SPI>
+    where SPI: FullDuplex<u8>
+{
+    spi: SPI
 }
 
 #[derive(Debug)]
@@ -26,8 +29,10 @@ pub enum SDCardInitializationError {
     NoResponse,
 }
 
-impl SDCard {
-    pub fn new(mut spi: Spidev) -> Result<SDCard, SDCardInitializationError> {
+impl<SPI> SDCard<SPI>
+    where SPI: FullDuplex<u8>
+{
+    pub fn new(mut spi: SPI, mut delay: impl DelayMs<u8>) -> Result<SDCard<SPI>, SDCardInitializationError> {
         const   CMD0: [u8; 6] = [0x40, 0x00, 0x00, 0x00, 0x00, 0x95];
         const   CMD8: [u8; 6] = [0x48, 0x00, 0x00, 0x01, 0xAA, 0x87];
         const  CMD55: [u8; 6] = [0x77, 0x00, 0x00, 0x00, 0x00, 0x65];
@@ -37,15 +42,19 @@ impl SDCard {
         // We write 80 clock cycles to the SD card to allow it to startup,
         // this is from the physical layer spec
         let blanks = [0xFF; 10];
-        spi.write(&blanks).unwrap();
-        let mut sd = SDCard { spi: spi };
-        let mut response = [0; 256];
+        for b in blanks.iter() {
+            spi.send(*b).unwrap_or_else(|_| panic!("Could not send cmd"));
+        }
 
+        let mut sd = SDCard { spi: spi };
+
+        let mut response = [0xFF; 8];
         sd.send_cmd(&CMD0, &mut response);
         if response[1] != 1 {
             panic!("Could not initialize SD Card");
         }
 
+        let mut response = [0xFF; 8];
         sd.send_cmd(&CMD8, &mut response);
         if response[4] != 0x1 || response[5] != 0xAA {
             panic!("Voltage check or check reponse failed");
@@ -56,10 +65,8 @@ impl SDCard {
         //SEND_OP_COND
         // We need to wait for the SD card to initialize, so we poll it every
         // 10 ms
-        let mut response = [0; 8];
+        let mut response = [0xFF; 8];
         for _ in 0..4 {
-            use std::{thread, time};
-
             sd.send_cmd(&CMD55, &mut response);
             sd.send_cmd(&ACMD41, &mut response);
 
@@ -67,8 +74,7 @@ impl SDCard {
                 break;
             }
 
-            let ten_millis = time::Duration::from_millis(10);
-            thread::sleep(ten_millis);
+            delay.delay_ms(10);
         }
 
         if response[1] != 0 {
@@ -78,23 +84,29 @@ impl SDCard {
         Ok(sd)
     }
 
-    fn send_cmd(&mut self, cmd_bytes: &[u8], response: &mut [u8]) -> usize {
-        let spacer = [0xFF; 1];
-        self.spi.write(&spacer).expect("Could not write spacer");
-        self.spi.write(cmd_bytes).expect(format!("Could not write command {:?}", cmd_bytes).as_str());
+    fn send_cmd(&mut self, cmd: &[u8], response: &mut [u8]) {
+        let spacer = 0xFF;
+        self.spi.send(spacer).unwrap_or_else(|_| panic!("Could not write spacer"));
 
-        self.spi.read(response).expect("Could not read response")
+        for b in cmd.iter() {
+            self.spi.send(*b).unwrap_or_else(|_| panic!("Could not write cmd"));
+        }
+
+        for b in response.iter_mut() {
+            *b = self.spi.read().unwrap_or_else(|_| panic!("Could not write command"));
+        }
     }
 }
 
-impl BlockAccessor for SDCard {
+impl<SPI> BlockAccessor for SDCard<SPI>
+    where SPI: FullDuplex<u8>
+{
     fn block_size(&self) -> u64 {
         512
     }
 
     fn read_block(&mut self, block_num: u64, block: &mut [u8]) {
         const DATA_START_BYTE: u8 = 0xFE;
-        let mut data = [0; 700];
         let cmd = [
             0x51,
             ((block_num & (0xFF << 24)) >> 24) as u8,
@@ -104,10 +116,8 @@ impl BlockAccessor for SDCard {
             0xFF
         ];
 
-        let spacer = [0xFF; 1];
-        self.spi.write(&spacer).unwrap();
-        self.spi.write(&cmd).unwrap();
-        self.spi.read(&mut data).unwrap();
+        let mut data = [0xFF; 700];
+        self.send_cmd(&cmd, &mut data);
 
         let data_start = match data.iter().enumerate().find(|&(_, val)| *val == DATA_START_BYTE) {
             Some((index, _val)) => index + 1,
@@ -128,7 +138,7 @@ impl BlockAccessor for SDCard {
 
 pub mod fat32 {
     use heapless::{String};
-    use heapless::consts::{U12, U13, U128};
+    use heapless::consts::{U12, U13, U128, U512, U4096};
     use byte_util::{little_endian_to_int, take_from_slice, taken_from_slice};
     use block_accessor::{BlockAccessor};
 
@@ -171,18 +181,21 @@ pub mod fat32 {
         /// of bytes that can  be returned from this function.
         pub fn get_cluster(&mut self, cluster_num: u32, byte_offset: usize, result: &mut [u8]) -> usize {
             assert!(cluster_num >= 2);
-            let mut out: Vec<u8> = Vec::new();
+            // Just use fixed-sized vec for now. ith 8 sectors_per_cluster this
+            // is the right size
+            // TODO: this is terrible
+            let mut out: Vec<u8, U4096> = Vec::new();
 
-            let cluster_start_offset: u32 =
+            let start_of_clusters_in_filesystem: u32 =
                 self.physical_start_block +
                 self.boot_sector.bpb.reserved_logical_sectors as u32 +
                 self.boot_sector.bpb.sectors_per_fat as u32 * 2;
 
-            let starting_block =
-                cluster_start_offset +
+            let first_block_of_cluster =
+                start_of_clusters_in_filesystem +
                 self.boot_sector.bpb.sectors_per_cluster as u32 *(cluster_num-2);
 
-            for block_num in starting_block..(starting_block +
+            for block_num in first_block_of_cluster..(first_block_of_cluster +
                     self.boot_sector.bpb.sectors_per_cluster as u32)
             {
                 let mut block = [0; 512];
@@ -275,29 +288,14 @@ pub mod fat32 {
             DirectoryIterator::new(self, cluster_num)
         }
 
-        pub fn get_file_from_cluster(&mut self, cluster_num: u32) -> Vec<u8> {
-            let mut out = Vec::new();
-            let mut cluster_num = Some(cluster_num);
-
-            while let Some(num) = cluster_num {
-                let mut block: Vec<u8> = [0].iter().cycle().take(4096).map(|i| *i).collect();
-                self.get_cluster(num, 0, block.as_mut_slice());
-                out.append(&mut block);
-                cluster_num = self.cluster_number_after(num);
-            }
-
-            out
-        }
-
         /// Undefined behaviour when the size of block doesn't evenly divide
         /// a cluster
-        pub fn iter_file<'a, 'b>(&'a mut self, file: File, block: &'b mut [u8]) -> FileIterator<'a, 'b, B> {
+        pub fn iter_file<'a, 'b>(&'a mut self, file: File) -> FileIterator<B> {
             FileIterator {
                 fat32: self,
                 cluster: Some(file.cluster),
                 bytes_read: 0,
                 file_size: file.size,
-                block: block
             }
         }
 
@@ -356,20 +354,24 @@ pub mod fat32 {
         }
     }
 
-    struct FileIterator<'a, 'b, B: 'a>
-        where B: BlockAccessor
+    pub struct FileIterator<'a, B: 'a>
+        where B: BlockAccessor,
     {
-        fat32: &'a Fat32<B>,
+        fat32: &'a mut Fat32<B>,
         cluster: Option<u32>,
         bytes_read: u32,
         file_size: u32,
-        block: &'b mut [u8]
     }
 
-    impl<'a, 'b, B> Iterator for FileIterator<'a, 'b, B>
+    use heapless::Vec;
+
+    // Replace U512 with a generic ArrayLength type when GAT's are implemented
+    // in rust
+    impl<'a, B> Iterator for FileIterator<'a, B>
         where B: BlockAccessor
     {
-        type Item = &'b [u8];
+        type Item = Vec<u8, U512>;
+
         fn next(&mut self) -> Option<Self::Item> {
             let bytes_per_cluster: u32 =
                 self.fat32.boot_sector.bpb.sectors_per_cluster as u32 * BYTES_PER_BLOCK as u32;
@@ -377,22 +379,30 @@ pub mod fat32 {
             match self.cluster {
                 None => None,
                 Some(cluster_num) => {
+                    let mut block = Vec::new();
+
+                    if self.file_size == self.bytes_read {
+                        return None;
+                    }
+
+                    let bytes_left = self.file_size - self.bytes_read;
+                    let bytes_to_read = usize::min(bytes_left as usize, block.capacity());
+
+                    // Shouldn't fail since it's resized with its own capacity
+                    block.resize_default(bytes_to_read).unwrap();
 
                     let bytes_read = self.fat32.get_cluster(
                         cluster_num,
                         (self.bytes_read % (bytes_per_cluster)) as usize,
-                        self.block) as u32;
+                        &mut block[0..bytes_to_read]) as u32;
+
                     self.bytes_read += bytes_read;
 
                     if self.bytes_read % bytes_per_cluster == 0 {
                         self.cluster = self.fat32.cluster_number_after(cluster_num);
                     }
 
-                    let bytes_left = self.file_size - self.bytes_read;
-                    // TODO return only the bytes in the file and not more
-                    // let bytes_to_return = self.block.split_at(bytes_read.min(bytes_left) as usize).0;
-                    // Some(bytes_to_return)
-                    Some(self.block)
+                    Some(block)
                 }
             }
         }
@@ -621,7 +631,7 @@ pub mod fat32 {
             let information_sector = getn(&mut bytes, 2) as u16;
             let backup_information_sector = getn(&mut bytes, 2) as u16;
             // Reserved section ignored
-            taken_from_slice(&mut bytes, 12).to_owned();
+            taken_from_slice(&mut bytes, 12);
             let drive_number = get(&mut bytes);
             // Flags ignored for Fat32
             get(&mut bytes);
@@ -633,7 +643,7 @@ pub mod fat32 {
             let label = [0; 11];
 
             // Actual file system type ignored for now (TODO)
-            taken_from_slice(&mut bytes, 8).clone();
+            taken_from_slice(&mut bytes, 8);
             let file_system_type: [u8; 8] = [0; 8];
 
             assert_eq!(boot_signature, 0x29);
@@ -921,11 +931,69 @@ pub mod byte_util {
 mod tests {
     use block_accessor::{BlockAccessor};
     use file_block_accessor::BlockAccessFile;
-    use spidev::{Spidev, SpidevOptions};
+    use linux_embedded_hal::spidev::{Spidev, SpidevOptions, SPI_MODE_0};
 
     use SDCard;
     use mbr::MBR;
     use fat32::{Fat32, DirectoryItem};
+
+    use std::fs::File;
+    use std::io::prelude::*;
+
+    use embedded_hal::blocking::delay::DelayMs;
+    use embedded_hal::spi::FullDuplex;
+
+    use nb;
+
+    struct SpidevAdapter {
+        spi: Spidev
+    }
+
+    impl SpidevAdapter {
+        fn get() -> SpidevAdapter {
+            let mut spi = Spidev::open("/dev/spidev0.0").unwrap();
+            let mut options = SpidevOptions::new();
+            options
+                 .bits_per_word(8)
+                 .max_speed_hz(1_000_000)
+                 .mode(SPI_MODE_0)
+                 .build();
+            spi.configure(&options).unwrap();
+
+            SpidevAdapter { spi }
+        }
+    }
+
+    impl FullDuplex<u8> for SpidevAdapter {
+        type Error = ();
+
+        fn read(&mut self) -> nb::Result<u8, Self::Error> {
+            let mut response_byte: [u8; 1] = [0xFF];
+            self.spi.read(&mut response_byte).unwrap();
+            Ok(response_byte[0])
+        }
+
+        fn send(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
+            self.spi.write(&[byte]).unwrap();
+            Ok(())
+        }
+    }
+
+    struct Delayer {}
+
+    impl Delayer {
+        fn new() -> Delayer {
+            Delayer {}
+        }
+    }
+
+    impl DelayMs<u8> for Delayer {
+        fn delay_ms(&mut self, ms: u8) {
+            use std::{thread, time};
+            let millis = time::Duration::from_millis(ms as u64);
+            thread::sleep(millis);
+        }
+    }
 
     #[test]
     fn basic_file_block_access() {
@@ -960,17 +1028,14 @@ mod tests {
             }
         }
 
-        use std::fs::File;
-        use std::io::prelude::*;
-
         match fat32.item_info("projects/shmorc/python_welcome.mp3").unwrap() {
             DirectoryItem::File(f) => {
                 assert_eq!(f.size, 19225);
-                let mut file = File::create("python_welcome.mp3").unwrap();
-                let mut file_data: Vec<u8> = fat32.get_file_from_cluster(f.cluster);
 
-                for block in fat32.iter_file(file_data, &mut block) {
-                    file.write(block).unwrap();
+                let mut local_file = File::create("python_welcome.mp3").unwrap();
+
+                for block in fat32.iter_file(f) {
+                    local_file.write(&block).unwrap();
                 }
             },
             _ => panic!("Should be a file")
@@ -979,27 +1044,12 @@ mod tests {
         // assert!(false);
     }
 
-    use std::io;
-    use spidev::{SPI_MODE_0};
-
-    fn create_spi() -> io::Result<Spidev> {
-        let mut spi = try!(Spidev::open("/dev/spidev0.0"));
-        let mut options = SpidevOptions::new();
-        options
-             .bits_per_word(8)
-             .max_speed_hz(1_000_000)
-             .mode(SPI_MODE_0)
-             .build();
-        try!(spi.configure(&options));
-        Ok(spi)
-    }
-
     #[test]
     #[ignore]
     fn sd_read() {
         let mut block = [0; 512];
-        let spi = create_spi().expect("Could not get spi");
-        let mut sd = SDCard::new(spi).unwrap();
+        let spi = SpidevAdapter::get();
+        let mut sd = SDCard::new(spi, Delayer::new()).unwrap();
         sd.read_block(0, &mut block);
         assert_eq!(block[510], 0x55);
         assert_eq!(block[511], 0xAA);
@@ -1028,8 +1078,8 @@ mod tests {
     #[test]
     #[ignore]
     fn fat32_basic() {
-        let spi = create_spi().expect("Could not get spi");
-        let mut sd = SDCard::new(spi).unwrap();
+        let spi = SpidevAdapter::get();
+        let mut sd = SDCard::new(spi, Delayer::new()).unwrap();
 
         let mut block = [0; 512];
         sd.read_block(0, &mut block);
@@ -1037,7 +1087,7 @@ mod tests {
         let mbr = MBR::from_bytes(&block);
         let partition = mbr.partition_entries.get(0).unwrap().as_ref().unwrap();
 
-        let mut fat32 = Fat32::new(sd, partition.first_sector_block_address);
+        let mut _fat32 = Fat32::new(sd, partition.first_sector_block_address);
         // assert_eq!(fat32.ls(&[""]), vec!["projects".to_string(), "TEST_PAR.T1".to_string()]);
     }
 }
