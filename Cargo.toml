@@ -4,11 +4,14 @@ version = "0.1.0"
 authors = ["Stephen Molyneaux <shmolyne@uwaterloo.ca>"]
 
 [dependencies]
-block_accessor = { path = "lib/block_accessor" }
+block-accessor = { path = "lib/block-accessor" }
 crc16 = "0.3.4"
 heapless = "0.3.5"
 bitflags = "1.0.3"
-linux-embedded-hal = "*"
 embedded-hal = "*"
-streaming-iterator = "*"
 nb = "*"
+
+[dev-dependencies]
+linux-embedded-hal = "*"
+file-block-accessor = { path = "lib/file-block-accessor" }
+md5 = "*"

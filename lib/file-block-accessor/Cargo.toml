@@ -1,0 +1,7 @@
+[package]
+name = "file-block-accessor"
+version = "0.1.0"
+authors = ["Stephen Molyneaux <shmolyne@uwaterloo.ca>"]
+
+[dependencies]
+block-accessor = { path = "../block-accessor" }

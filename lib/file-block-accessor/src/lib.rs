@@ -1,3 +1,5 @@
+extern crate block_accessor;
+
 use std::fs::File;
 use block_accessor::*;
 use std::io;
