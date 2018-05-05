@@ -30,11 +30,11 @@ impl<SPI> SDCard<SPI>
         // We write 80 clock cycles to the SD card to allow it to startup,
         // this is from the physical layer spec
         let blanks = [0xFF; 10];
-        for b in blanks.iter() {
+        for b in &blanks {
             spi.send(*b).unwrap_or_else(|_| panic!("Could not send cmd"));
         }
 
-        let mut sd = SDCard { spi: spi };
+        let mut sd = SDCard { spi };
 
         let mut response = [0xFF; 8];
         sd.send_cmd(&CMD0, &mut response);
@@ -113,7 +113,7 @@ impl<SPI> BlockAccessor for SDCard<SPI>
         };
 
         for (data_index, block_index) in (data_start..(data_start+512)).zip(0..512) {
-            *block.get_mut(block_index).unwrap() = data[data_index];
+            block[block_index] = data[data_index];
         }
     }
 

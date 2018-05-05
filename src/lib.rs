@@ -135,7 +135,7 @@ mod tests {
 
                 let mut local_file = File::create("python_welcome.mp3").unwrap();
 
-                for block in fat32.iter_file(f) {
+                for block in fat32.iter_file(&f) {
                     local_file.write(&block).unwrap();
                 }
             },

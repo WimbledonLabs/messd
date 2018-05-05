@@ -17,13 +17,13 @@ impl<B: BlockAccessor> Fat32<B> {
     pub fn new(mut block_storage: B, physical_start_block: u32) -> Fat32<B> {
         let mut block = [0; 512];
 
-        block_storage.read_block(physical_start_block as u64, &mut block);
+        block_storage.read_block(u64::from(physical_start_block), &mut block);
         let boot_sector = BootSector::new(&block);
 
         Fat32 {
-            block_storage: block_storage,
-            physical_start_block: physical_start_block,
-            boot_sector: boot_sector
+            block_storage,
+            physical_start_block,
+            boot_sector
         }
     }
 
@@ -47,18 +47,18 @@ impl<B: BlockAccessor> Fat32<B> {
 
         let start_of_clusters_in_filesystem: u32 =
             self.physical_start_block +
-            self.boot_sector.bpb.reserved_logical_sectors as u32 +
-            self.boot_sector.bpb.sectors_per_fat as u32 * 2;
+            u32::from(self.boot_sector.bpb.reserved_logical_sectors) +
+            self.boot_sector.bpb.sectors_per_fat * 2;
 
         let first_block_of_cluster =
             start_of_clusters_in_filesystem +
-            self.boot_sector.bpb.sectors_per_cluster as u32 *(cluster_num-2);
+            u32::from(self.boot_sector.bpb.sectors_per_cluster) * (cluster_num-2);
 
         for block_num in first_block_of_cluster..(first_block_of_cluster +
-                self.boot_sector.bpb.sectors_per_cluster as u32)
+                u32::from(self.boot_sector.bpb.sectors_per_cluster))
         {
             let mut block = [0; 512];
-            self.block_storage.read_block(block_num as u64, &mut block);
+            self.block_storage.read_block(u64::from(block_num), &mut block);
             out.extend(block.iter());
         }
 
@@ -82,12 +82,12 @@ impl<B: BlockAccessor> Fat32<B> {
         assert!(cluster_num >= 2);
 
         let file_allocation_table_start_block: u64 =
-            self.physical_start_block as u64 +
-            self.boot_sector.bpb.reserved_logical_sectors as u64;
+            u64::from(self.physical_start_block) +
+            u64::from(self.boot_sector.bpb.reserved_logical_sectors);
 
         let block_num_for_cluster: u64 =
             file_allocation_table_start_block +
-            (cluster_num as u64 * BYTES_PER_CLUSTER_ENTRY) / BYTES_PER_BLOCK as u64;
+            (u64::from(cluster_num) * BYTES_PER_CLUSTER_ENTRY) / u64::from(BYTES_PER_BLOCK);
 
         let mut block = [0; 512];
         self.block_storage.read_block(block_num_for_cluster, &mut block);
@@ -105,13 +105,13 @@ impl<B: BlockAccessor> Fat32<B> {
         }
     }
 
-    pub fn iter_contents_of_directory_cluster<'a>(&'a mut self, cluster_num: u32) -> DirectoryIterator<'a, B> {
+    pub fn iter_contents_of_directory_cluster(&mut self, cluster_num: u32) -> DirectoryIterator<B> {
         DirectoryIterator::new(self, cluster_num)
     }
 
     /// Undefined behaviour when the size of block doesn't evenly divide
     /// a cluster
-    pub fn iter_file<'a, 'b>(&'a mut self, file: File) -> FileIterator<B> {
+    pub fn iter_file<'a>(&'a mut self, file: &File) -> FileIterator<B> {
         FileIterator {
             fat32: self,
             cluster: Some(file.cluster),
@@ -124,7 +124,7 @@ impl<B: BlockAccessor> Fat32<B> {
         // Start at the root directory
         let mut current_cluster = 2;
 
-        if path.ends_with("/") {
+        if path.ends_with('/') {
             // Files don't end with '/'
             return None
         }
@@ -134,7 +134,7 @@ impl<B: BlockAccessor> Fat32<B> {
         let path_iter = path.split('/');
 
         'iter_part: for (part_num, part) in path_iter.enumerate() {
-            if part.len() == 0 {
+            if part.is_empty() {
                 continue;
             }
 
@@ -187,7 +187,7 @@ impl<'a, B> Iterator for FileIterator<'a, B>
 
     fn next(&mut self) -> Option<Self::Item> {
         let bytes_per_cluster: u32 =
-            self.fat32.boot_sector.bpb.sectors_per_cluster as u32 * BYTES_PER_BLOCK as u32;
+            u32::from(self.fat32.boot_sector.bpb.sectors_per_cluster) * BYTES_PER_BLOCK;
 
         match self.cluster {
             None => None,
@@ -236,8 +236,8 @@ impl<'a, B: BlockAccessor> DirectoryIterator<'a, B> {
         DirectoryIterator<'a, B>
     {
         DirectoryIterator {
-            fat32: fat32,
-            cluster: cluster,
+            fat32,
+            cluster,
             entry_in_cluster: 0
         }
     }
@@ -290,7 +290,7 @@ impl<'a, B: BlockAccessor> Iterator for DirectoryIterator<'a, B> {
                     item_name = new_item_name;
                 },
                 Entry::DirectoryEntry(e) => {
-                    if item_name.len() == 0 {
+                    if item_name.is_empty() {
                         item_name.push_str(&e.name()).unwrap();
                     }
 
@@ -331,9 +331,9 @@ impl BootSector {
             panic!("Boot sector must be 512 bytes")
         }
 
-        let jump_instruction: u32 = ((bytes[2] as u32) << 16) +
-                                    ((bytes[1] as u32) <<  8) +
-                                      bytes[0] as u32;
+        let jump_instruction: u32 = (u32::from(bytes[2]) << 16) +
+                                    (u32::from(bytes[1]) <<  8) +
+                                     u32::from(bytes[0]);
         let oem_name = [
             bytes[3],
             bytes[4],
@@ -344,17 +344,17 @@ impl BootSector {
             bytes[9],
             bytes[10],
         ];
-        let ebpb = EBPB::new(&bytes[11..509]);
+        let bpb = EBPB::new(&bytes[11..509]);
         let drive_number = bytes[509];
         if bytes[510] != 0x55 || bytes[511] != 0xAA {
             panic!("BPB check bytes not correct!");
         }
 
         BootSector {
-            jump_instruction: jump_instruction,
-            oem_name: oem_name,
-            bpb: ebpb,
-            drive_number: drive_number
+            jump_instruction,
+            oem_name,
+            bpb,
+            drive_number
         }
     }
 }
@@ -456,28 +456,28 @@ impl EBPB {
         assert_eq!(boot_signature, 0x29);
 
         EBPB {
-            bytes_per_logical_sector: bytes_per_logical_sector,
-            sectors_per_cluster: sectors_per_cluster,
-            reserved_logical_sectors: reserved_logical_sectors,
-            number_of_fats: number_of_fats,
-            root_directory_entries: root_directory_entries,
-            total_logical_sectors: total_logical_sectors,
-            media_descriptor: media_descriptor,
-            sectors_per_track: sectors_per_track,
-            heads_per_disk: heads_per_disk,
-            hidden_sectors: hidden_sectors,
-            sector_count: sector_count,
-            sectors_per_fat: sectors_per_fat,
-            flags: flags,
-            version: version,
-            root_directory_cluster: root_directory_cluster,
-            information_sector: information_sector,
-            backup_information_sector: backup_information_sector,
-            drive_number: drive_number,
-            boot_signature: boot_signature,
-            serial_number: serial_number,
-            label: label,
-            file_system_type: file_system_type
+            bytes_per_logical_sector,
+            sectors_per_cluster,
+            reserved_logical_sectors,
+            number_of_fats,
+            root_directory_entries,
+            total_logical_sectors,
+            media_descriptor,
+            sectors_per_track,
+            heads_per_disk,
+            hidden_sectors,
+            sector_count,
+            sectors_per_fat,
+            flags,
+            version,
+            root_directory_cluster,
+            information_sector,
+            backup_information_sector,
+            drive_number,
+            boot_signature,
+            serial_number,
+            label,
+            file_system_type
         }
     }
 }
@@ -524,17 +524,17 @@ impl LfnEntry {
              0x0E, 0x10, 0x12, 0x14, 0x16, 0x18,
              0x1C, 0x1E].iter().enumerate()
         {
-            file_name[filename_position] = ((bytes[*input_position as usize] as u16) << 8) +
-                                            (bytes[input_position+1 as usize] as u16);
+            file_name[filename_position] = (u16::from(bytes[*input_position as usize]) << 8) +
+                                            u16::from(bytes[input_position+1 as usize]);
         }
 
-        LfnEntry {file_name: file_name}
+        LfnEntry {file_name}
     }
 
     fn name(&self) -> String<U13> {
         let mut name = String::new();
 
-        for codepoint in self.file_name.iter() {
+        for codepoint in &self.file_name {
             let ch = (codepoint >> 8) as u8;
 
             if ch == 0 {
@@ -546,9 +546,8 @@ impl LfnEntry {
                 continue;
             }
 
-            match name.push(ch as char) {
-                Err(_) => break,
-                _ => ()
+            if name.push(ch as char).is_err() {
+                break;
             }
         }
 
@@ -601,24 +600,24 @@ impl DirectoryEntry {
         let size = little_endian_to_int(&bytes[0x1C..0x20]);
 
         DirectoryEntry {
-            file_name_bytes: file_name_bytes,
-            file_extension_bytes: file_extension_bytes,
-            flags: flags,
-            cluster_num: cluster_num,
-            size: size
+            file_name_bytes,
+            file_extension_bytes,
+            flags,
+            cluster_num,
+            size
         }
     }
 
     fn name(&self) -> String<U12> {
         let mut name = String::new();
 
-        for ch in self.file_name_bytes.iter() {
+        for ch in &self.file_name_bytes {
             name.push(*ch as char).unwrap();
         }
 
         name.push('.').unwrap();
 
-        for ch in self.file_extension_bytes.iter() {
+        for ch in &self.file_extension_bytes {
             name.push(*ch as char).unwrap();
         }
 

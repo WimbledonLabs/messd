@@ -47,30 +47,30 @@ impl PartitionEntry {
         // TODO: Make the rest of these little endian
         let status = bytes[0];
 
-        let first_sector_chs_address = ((bytes[1] as u32) << 16) +
-                                       ((bytes[2] as u32) <<  8) +
-                                       bytes[3] as u32;
+        let first_sector_chs_address = (u32::from(bytes[1]) << 16) +
+                                       (u32::from(bytes[2]) <<  8) +
+                                        u32::from(bytes[3]);
         let partition_type = bytes[4];
         if partition_type == 0 {
             return None;
         }
 
-        let last_sector_chs_address = ((bytes[5] as u32) << 16) +
-                                      ((bytes[6] as u32) <<  8) +
-                                        bytes[7] as u32;
+        let last_sector_chs_address = (u32::from(bytes[5]) << 16) +
+                                      (u32::from(bytes[6]) <<  8) +
+                                       u32::from(bytes[7]);
         let first_sector_block_address = little_endian_to_int(&bytes[8..12]);
-        let sector_count = ((bytes[12] as u32) << 24) +
-                           ((bytes[13] as u32) << 16) +
-                           ((bytes[14] as u32) <<  8) +
-                           bytes[15] as u32;
+        let sector_count = (u32::from(bytes[12]) << 24) +
+                           (u32::from(bytes[13]) << 16) +
+                           (u32::from(bytes[14]) <<  8) +
+                            u32::from(bytes[15]);
         Some(
             PartitionEntry {
-                status: status,
-                first_sector_chs_address: first_sector_chs_address,
-                partition_type: partition_type,
-                last_sector_chs_address: last_sector_chs_address,
-                first_sector_block_address: first_sector_block_address,
-                sector_count: sector_count
+                status,
+                first_sector_chs_address,
+                partition_type,
+                last_sector_chs_address,
+                first_sector_block_address,
+                sector_count
             }
         )
     }
