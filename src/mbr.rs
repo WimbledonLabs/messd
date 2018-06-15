@@ -6,12 +6,12 @@ pub struct MBR {
 }
 
 impl MBR {
-    pub fn from_bytes(bytes: &[u8]) -> MBR {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        const PARTITION_LOCATIONS: [u16; 4] = [0x1BE, 0x1CE, 0x1DE, 0x1EE];
+
         if bytes.len() != 512 {
             panic!("MBR must be 512 bytes");
         }
-
-        const PARTITION_LOCATIONS: [u16; 4] = [0x1BE, 0x1CE, 0x1DE, 0x1EE];
 
         let mut partitions: [Option<PartitionEntry>; 4] = [None, None, None, None];
         for (partition_number, partition_location) in PARTITION_LOCATIONS.iter().enumerate() {
@@ -20,7 +20,7 @@ impl MBR {
                 PartitionEntry::from_bytes(&bytes[partition_location..partition_location+16]);
         }
 
-        MBR { partition_entries: partitions }
+        Self { partition_entries: partitions }
     }
 
     pub fn partition_count(&self) -> u8 {
@@ -39,7 +39,7 @@ pub struct PartitionEntry {
 }
 
 impl PartitionEntry {
-    pub fn from_bytes(bytes: &[u8]) -> Option<PartitionEntry> {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != 16 {
             panic!("Partition entry length must be 16");
         }
@@ -64,7 +64,7 @@ impl PartitionEntry {
                            (u32::from(bytes[14]) <<  8) +
                             u32::from(bytes[15]);
         Some(
-            PartitionEntry {
+            Self {
                 status,
                 first_sector_chs_address,
                 partition_type,

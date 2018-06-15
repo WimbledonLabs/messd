@@ -17,9 +17,11 @@ impl<B: BlockAccessor> Fat32<B> {
     pub fn new(mut block_storage: B, physical_start_block: u32) -> Fat32<B> {
         let mut block = [0; 512];
 
-        block_storage.read_block(u64::from(physical_start_block), &mut block);
+        let physical_start_block: u64 = u64::from(physical_start_block);
+        block_storage.read_block(physical_start_block, &mut block);
         let boot_sector = BootSector::new(&block);
 
+        let physical_start_block: u32 = physical_start_block as u32;
         Fat32 {
             block_storage,
             physical_start_block,
@@ -491,7 +493,7 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub fn new(bytes: &[u8]) -> Entry {
+    pub fn new(bytes: &[u8]) -> Self {
         if bytes.len() != 32 {
             panic!("Fat32 entry length must be 32 bytes!");
         }
@@ -513,7 +515,7 @@ pub struct LfnEntry {
 }
 
 impl LfnEntry {
-    fn new(bytes: &[u8]) -> LfnEntry {
+    fn new(bytes: &[u8]) -> Self {
         assert!(bytes.len() == 32);
         assert_eq!(bytes[0x0B], 0x0F);
 
@@ -528,7 +530,7 @@ impl LfnEntry {
                                             u16::from(bytes[input_position+1 as usize]);
         }
 
-        LfnEntry {file_name}
+        Self {file_name}
     }
 
     fn name(&self) -> String<U13> {
@@ -578,7 +580,7 @@ pub struct DirectoryEntry {
 }
 
 impl DirectoryEntry {
-    fn new(bytes: &[u8]) -> DirectoryEntry {
+    fn new(bytes: &[u8]) -> Self {
         assert!(bytes.len() == 32);
 
         let mut file_name_bytes = [0; 8];
@@ -599,7 +601,7 @@ impl DirectoryEntry {
         let cluster_num = (high_cluster_num << 16) + low_cluster_num;
         let size = little_endian_to_int(&bytes[0x1C..0x20]);
 
-        DirectoryEntry {
+        Self {
             file_name_bytes,
             file_extension_bytes,
             flags,

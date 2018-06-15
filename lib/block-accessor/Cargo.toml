@@ -2,5 +2,6 @@
 name = "block-accessor"
 version = "0.1.0"
 authors = ["Stephen Molyneaux <shmolyne@uwaterloo.ca>"]
+categories = ["no-std"]
 
 [dependencies]

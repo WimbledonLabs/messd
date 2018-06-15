@@ -9,8 +9,8 @@ extern crate std;
 extern crate bitflags;
 
 // Other crates
-extern crate crc16;
-extern crate embedded_hal;
+// extern crate crc16;
+extern crate embedded_hal as hal;
 extern crate heapless;
 extern crate nb;
 
@@ -43,6 +43,7 @@ mod tests {
 
     use embedded_hal::blocking::delay::DelayMs;
     use embedded_hal::spi::FullDuplex;
+    use embedded_hal::digital::OutputPin;
 
     use nb;
 
@@ -152,12 +153,21 @@ mod tests {
         // assert!(false);
     }
 
+    struct MockPin {}
+
+    impl OutputPin for MockPin {
+        fn is_high(&self) -> bool { false }
+        fn is_low(&self) -> bool { false }
+        fn set_high(&mut self) {}
+        fn set_low(&mut self) {}
+    }
+
     #[test]
     #[ignore]
     fn sd_read() {
         let mut block = [0; 512];
         let spi = SpidevAdapter::get();
-        let mut sd = SDCard::new(spi, Delayer::new()).unwrap();
+        let mut sd = SDCard::new(spi, Delayer::new(), MockPin {} ).unwrap();
         sd.read_block(0, &mut block);
         assert_eq!(block[510], 0x55);
         assert_eq!(block[511], 0xAA);
@@ -187,7 +197,7 @@ mod tests {
     #[ignore]
     fn fat32_basic() {
         let spi = SpidevAdapter::get();
-        let mut sd = SDCard::new(spi, Delayer::new()).unwrap();
+        let mut sd = SDCard::new(spi, Delayer::new(), MockPin {}).unwrap();
 
         let mut block = [0; 512];
         sd.read_block(0, &mut block);

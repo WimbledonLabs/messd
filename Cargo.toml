@@ -5,7 +5,6 @@ authors = ["Stephen Molyneaux <shmolyne@uwaterloo.ca>"]
 
 [dependencies]
 block-accessor = { path = "lib/block-accessor" }
-crc16 = "0.3.4"
 heapless = "0.3.5"
 bitflags = "1.0.3"
 embedded-hal = "*"
